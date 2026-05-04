@@ -2,7 +2,7 @@ package task
 
 import (
 	//"crypto/tls"
-	"context"
+
 	"io"
 	"log"
 	"net"
@@ -30,16 +30,13 @@ func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
 	hc := http.Client{
 		Timeout: time.Second * 2,
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, address)
-			},
+			DialContext: getDialContext(ip),
 			//TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 跳过证书验证
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // 阻止重定向
 		},
 	}
-	defer hc.CloseIdleConnections()
 
 	// 先访问一次获得 HTTP 状态码 及 地区码
 	var colo string

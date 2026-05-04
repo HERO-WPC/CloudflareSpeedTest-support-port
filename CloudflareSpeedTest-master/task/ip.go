@@ -13,22 +13,15 @@ import (
 
 const defaultInputFile = "ip.txt"
 
-// IPPort 表示一个 IP 地址及其对应端口的组合
-type IPPort struct {
-	IP   *net.IPAddr
-	Port int
-}
-
 var (
 	// TestAll test all ip
 	TestAll = false
 	// IPFile is the filename of IP Rangs
 	IPFile = defaultInputFile
 	IPText string
+	// PortMapping stores IP to port mapping for proxy mode
+	PortMapping = make(map[string]int)
 )
-
-// IPPorts 存储所有 IP 及其对应端口的列表
-var IPPorts []*IPPort
 
 func InitRandSeed() {
 	rand.Seed(time.Now().UnixNano())
@@ -156,78 +149,8 @@ func (r *IPRanges) chooseIPv6() {
 	}
 }
 
-// isHeaderLine 判断是否为表头行（如 host,ip,port 或 ip,port 等）
-func isHeaderLine(line string) bool {
-	line = strings.ToLower(strings.TrimSpace(line))
-	// 常见表头格式
-	headers := []string{"host,ip,port", "ip,port", "ip", "address", "ip address"}
-	for _, h := range headers {
-		if line == h {
-			return true
-		}
-	}
-	// 如果包含逗号且第一部分是 host/ip/address 等关键字
-	if strings.Contains(line, ",") {
-		parts := strings.Split(line, ",")
-		if len(parts) >= 2 {
-			firstField := strings.ToLower(strings.TrimSpace(parts[0]))
-			if firstField == "host" || firstField == "ip" || firstField == "address" || firstField == "domain" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func parseIPAndPort(input string) (ip string, port int) {
-	port = TCPPort // 默认使用全局端口设置
-	ip = input
-
-	// 检查是否是CSV格式（包含逗号），如 "IP:端口,IP,端口" 或 "https://IP,IP,端口"
-	if strings.Contains(input, ",") {
-		parts := strings.Split(input, ",")
-		if len(parts) >= 1 {
-			firstPart := strings.TrimSpace(parts[0])
-			// 去掉可能的 https:// 前缀
-			firstPart = strings.TrimPrefix(firstPart, "https://")
-			firstPart = strings.TrimPrefix(firstPart, "http://")
-			// 递归解析第一部分
-			ip, port = parseIPAndPort(firstPart)
-		}
-		return
-	}
-
-	// 检查是否包含冒号（可能是 IP:端口 格式）
-	if idx := strings.LastIndex(input, ":"); idx != -1 {
-		// 检查冒号前面是否是有效的 IP 地址
-		// 通过检查冒号前面是否有 ] 来判断是否是 IPv6
-		beforeColon := input[:idx]
-		if strings.HasSuffix(beforeColon, "]") {
-			// IPv6 格式: [::1]:443
-			ip = beforeColon[:len(beforeColon)-1] + "]" // 还原为标准 IPv6 格式
-			portStr := input[idx+1:]
-			if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p < 65536 {
-				port = p
-			}
-		} else if !strings.Contains(beforeColon, "/") {
-			// IPv4 格式: 1.1.1.1:443（不包含 / 说明不是 CIDR）
-			ip = beforeColon
-			portStr := input[idx+1:]
-			if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p < 65536 {
-				port = p
-			}
-		}
-		// 如果是 CIDR 格式 (包含 /)，则保持原样，使用全局端口
-	}
-	return
-}
-
-// loadIPRanges 加载 IP 段数据，支持 IP:端口 格式
-// 如果 IP 后带有端口（如 1.1.1.1:443），则使用指定端口，否则使用默认端口 443
 func loadIPRanges() []*net.IPAddr {
 	ranges := newIPRanges()
-	IPPorts = make([]*IPPort, 0) // 初始化 IP 端口列表
-
 	if IPText != "" { // 从参数中获取 IP 段数据
 		IPs := strings.Split(IPText, ",") // 以逗号分隔为数组并循环遍历
 		for _, IP := range IPs {
@@ -235,18 +158,11 @@ func loadIPRanges() []*net.IPAddr {
 			if IP == "" {              // 跳过空的（即开头、结尾或连续多个 ,, 的情况）
 				continue
 			}
-			// 解析 IP 和端口
-			parsedIP, port := parseIPAndPort(IP)
-			prevCount := len(ranges.ips) // 记录之前的 IP 数量
-			ranges.parseCIDR(parsedIP)   // 解析 IP 段，获得 IP、IP 范围、子网掩码
-			if isIPv4(parsedIP) {        // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
+			ranges.parseCIDR(IP) // 解析 IP 段，获得 IP、IP 范围、子网掩码
+			if isIPv4(IP) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
 				ranges.chooseIPv4()
 			} else {
 				ranges.chooseIPv6()
-			}
-			// 为每个新生成的 IP 设置端口
-			for _, ip := range ranges.ips[prevCount:] {
-				IPPorts = append(IPPorts, &IPPort{IP: ip, Port: port})
 			}
 		}
 	} else { // 从文件中获取 IP 段数据
@@ -259,34 +175,32 @@ func loadIPRanges() []*net.IPAddr {
 		}
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
-		isFirstLine := true // 标记是否第一行
 		for scanner.Scan() { // 循环遍历文件每一行
-			line := scanner.Text()
-			// 跳过UTF-8 BOM头
-			if isFirstLine && len(line) >= 3 && line[0] == 0xEF && line[1] == 0xBB && line[2] == 0xBF {
-				line = line[3:]
-			}
-			line = strings.TrimSpace(line)
-			isFirstLine = false
-		if line == "" { // 跳过空行
+			line := strings.TrimSpace(scanner.Text()) // 去除首尾的空白字符（空格、制表符、换行符等）
+			if line == "" {                           // 跳过空行
 				continue
 			}
-			// 跳过表头行（如 host,ip,port）
-			if isHeaderLine(line) {
-				continue
+
+			// 检查是否是 IP:端口 格式（反代模式）
+			if strings.Contains(line, ":") && !strings.Contains(line, "/") {
+				parts := strings.Split(line, ":")
+				if len(parts) == 2 {
+					ip := strings.TrimSpace(parts[0])
+					portStr := strings.TrimSpace(parts[1])
+					if port, err := strconv.Atoi(portStr); err == nil && port > 0 && port < 65536 {
+						// 存储端口映射
+						PortMapping[ip] = port
+						// 将IP作为单个IP处理
+						line = ip
+					}
+				}
 			}
-			// 解析 IP 和端口
-			parsedIP, port := parseIPAndPort(line)
-			prevCount := len(ranges.ips) // 记录之前的 IP 数量
-			ranges.parseCIDR(parsedIP)   // 解析 IP 段，获得 IP、IP 范围、子网掩码
-			if isIPv4(parsedIP) {        // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
+
+			ranges.parseCIDR(line) // 解析 IP 段，获得 IP、IP 范围、子网掩码
+			if isIPv4(line) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
 				ranges.chooseIPv4()
 			} else {
 				ranges.chooseIPv6()
-			}
-			// 为每个新生成的 IP 设置端口
-			for _, ip := range ranges.ips[prevCount:] {
-				IPPorts = append(IPPorts, &IPPort{IP: ip, Port: port})
 			}
 		}
 	}

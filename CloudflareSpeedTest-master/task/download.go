@@ -31,8 +31,6 @@ var (
 
 	TestCount = defaultTestNum
 	MinSpeed  = defaultMinSpeed
-
-	DownloadIPPorts []*IPPort // 下载测速时使用的 IP 端口列表（用于 per-IP 端口支持）
 )
 
 func checkDownloadDefault() {
@@ -67,13 +65,7 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 		TestCount = testNum
 	}
 
-	// 检查是否使用了混合端口
-	hasMixedPorts := len(DownloadIPPorts) > 0 && DownloadIPPorts[0].Port != TCPPort
-	if hasMixedPorts {
-		utils.Cyan.Printf("开始下载测速（下限：%.2f MB/s, 数量：%d, 队列：%d, 端口：每个IP独立端口）\n", MinSpeed, TestCount, testNum)
-	} else {
-		utils.Cyan.Printf("开始下载测速（下限：%.2f MB/s, 数量：%d, 队列：%d）\n", MinSpeed, TestCount, testNum)
-	}
+	utils.Cyan.Printf("开始下载测速（下限：%.2f MB/s, 数量：%d, 队列：%d）\n", MinSpeed, TestCount, testNum)
 	// 控制 下载测速进度条 与 延迟测速进度条 长度一致（强迫症）
 	bar_a := len(strconv.Itoa(len(ipSet)))
 	bar_b := "     "
@@ -82,7 +74,7 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	}
 	bar := utils.NewBar(TestCount, bar_b, "")
 	for i := 0; i < testNum; i++ {
-		speed, colo := downloadHandler(i, ipSet[i].IP)
+		speed, colo := downloadHandler(ipSet[i].IP)
 		ipSet[i].DownloadSpeed = speed
 		if ipSet[i].Colo == "" { // 只有当 Colo 是空的时候，才写入，否则代表之前是 httping 测速并获取过了
 			ipSet[i].Colo = colo
@@ -108,14 +100,15 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	return
 }
 
-func getDialContext(index int, ip *net.IPAddr) func(ctx context.Context, network, address string) (net.Conn, error) {
-	// 获取该 IP 对应的端口（如果存在的话）
+func getDialContext(ip *net.IPAddr) func(ctx context.Context, network, address string) (net.Conn, error) {
+	var fakeSourceAddr string
+
+	// 检查是否有端口映射（反代模式）
 	port := TCPPort
-	if len(DownloadIPPorts) > index {
-		port = DownloadIPPorts[index].Port
+	if mappedPort, exists := PortMapping[ip.String()]; exists {
+		port = mappedPort
 	}
 
-	var fakeSourceAddr string
 	if isIPv4(ip.String()) {
 		fakeSourceAddr = fmt.Sprintf("%s:%d", ip.String(), port)
 	} else {
@@ -150,10 +143,10 @@ func printDownloadDebugInfo(ip *net.IPAddr, err error, statusCode int, url, last
 }
 
 // return download Speed
-func downloadHandler(index int, ip *net.IPAddr) (float64, string) {
+func downloadHandler(ip *net.IPAddr) (float64, string) {
 	var lastRedirectURL string // 用于记录最后一次重定向目标，以便在访问错误时输出
 	client := &http.Client{
-		Transport: &http.Transport{DialContext: getDialContext(index, ip)},
+		Transport: &http.Transport{DialContext: getDialContext(ip)},
 		Timeout:   Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			lastRedirectURL = req.URL.String() // 记录每次重定向的目标，以便在访问错误时输出
@@ -169,7 +162,6 @@ func downloadHandler(index int, ip *net.IPAddr) (float64, string) {
 			return nil
 		},
 	}
-	defer client.CloseIdleConnections()
 	req, err := http.NewRequest("GET", URL, nil)
 	if err != nil {
 		if utils.Debug { // 调试模式下，输出更多信息

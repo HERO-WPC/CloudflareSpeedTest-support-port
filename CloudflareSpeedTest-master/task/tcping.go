@@ -32,7 +32,6 @@ type Ping struct {
 	csv     utils.PingDelaySet
 	control chan bool
 	bar     *utils.Bar
-	ipPorts []*IPPort // 每个 IP 对应的端口列表
 }
 
 func checkPingDefault() {
@@ -57,7 +56,6 @@ func NewPing() *Ping {
 		csv:     make(utils.PingDelaySet, 0),
 		control: make(chan bool, Routines),
 		bar:     utils.NewBar(len(ips), "可用:", ""),
-		ipPorts: IPPorts, // 保存 IP 端口列表
 	}
 }
 
@@ -65,25 +63,15 @@ func (p *Ping) Run() utils.PingDelaySet {
 	if len(p.ips) == 0 {
 		return p.csv
 	}
-	// 检查是否使用了混合端口（每个 IP 有不同的端口）
-	hasMixedPorts := len(p.ipPorts) > 0 && p.ipPorts[0].Port != TCPPort
 	if Httping {
-		if hasMixedPorts {
-			utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：每个IP独立端口, 范围：%v ~ %v ms, 丢包：%.2f)\n", utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-		} else {
-			utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-		}
+		utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
 	} else {
-		if hasMixedPorts {
-			utils.Cyan.Printf("开始延迟测速（模式：TCP, 端口：每个IP独立端口, 范围：%v ~ %v ms, 丢包：%.2f)\n", utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-		} else {
-			utils.Cyan.Printf("开始延迟测速（模式：TCP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
-		}
+		utils.Cyan.Printf("开始延迟测速（模式：TCP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
 	}
-	for i, ip := range p.ips {
+	for _, ip := range p.ips {
 		p.wg.Add(1)
 		p.control <- false
-		go p.start(i, ip)
+		go p.start(ip)
 	}
 	p.wg.Wait()
 	p.bar.Done()
@@ -91,23 +79,23 @@ func (p *Ping) Run() utils.PingDelaySet {
 	return p.csv
 }
 
-func (p *Ping) start(index int, ip *net.IPAddr) {
+func (p *Ping) start(ip *net.IPAddr) {
 	defer p.wg.Done()
-	p.tcpingHandler(index, ip)
+	p.tcpingHandler(ip)
 	<-p.control
 }
 
 // bool connectionSucceed float32 time
-func (p *Ping) tcping(index int, ip *net.IPAddr) (bool, time.Duration) {
+func (p *Ping) tcping(ip *net.IPAddr) (bool, time.Duration) {
 	startTime := time.Now()
-	
-	// 获取该 IP 对应的端口（如果存在的话）
-	port := TCPPort
-	if len(p.ipPorts) > index {
-		port = p.ipPorts[index].Port
-	}
-	
 	var fullAddress string
+
+	// 检查是否有端口映射（反代模式）
+	port := TCPPort
+	if mappedPort, exists := PortMapping[ip.String()]; exists {
+		port = mappedPort
+	}
+
 	if isIPv4(ip.String()) {
 		fullAddress = fmt.Sprintf("%s:%d", ip.String(), port)
 	} else {
@@ -123,14 +111,14 @@ func (p *Ping) tcping(index int, ip *net.IPAddr) (bool, time.Duration) {
 }
 
 // pingReceived pingTotalTime
-func (p *Ping) checkConnection(index int, ip *net.IPAddr) (recv int, totalDelay time.Duration, colo string) {
+func (p *Ping) checkConnection(ip *net.IPAddr) (recv int, totalDelay time.Duration, colo string) {
 	if Httping {
 		recv, totalDelay, colo = p.httping(ip)
 		return
 	}
 	colo = "" // TCPing 不获取 colo
 	for i := 0; i < PingTimes; i++ {
-		if ok, delay := p.tcping(index, ip); ok {
+		if ok, delay := p.tcping(ip); ok {
 			recv++
 			totalDelay += delay
 		}
@@ -147,8 +135,8 @@ func (p *Ping) appendIPData(data *utils.PingData) {
 }
 
 // handle tcping
-func (p *Ping) tcpingHandler(index int, ip *net.IPAddr) {
-	recv, totalDlay, colo := p.checkConnection(index, ip)
+func (p *Ping) tcpingHandler(ip *net.IPAddr) {
+	recv, totalDlay, colo := p.checkConnection(ip)
 	nowAble := len(p.csv)
 	if recv != 0 {
 		nowAble++
@@ -157,12 +145,19 @@ func (p *Ping) tcpingHandler(index int, ip *net.IPAddr) {
 	if recv == 0 {
 		return
 	}
+	// 获取使用的端口
+	port := TCPPort
+	if mappedPort, exists := PortMapping[ip.String()]; exists {
+		port = mappedPort
+	}
+
 	data := &utils.PingData{
 		IP:       ip,
 		Sended:   PingTimes,
 		Received: recv,
 		Delay:    totalDlay / time.Duration(recv),
 		Colo:     colo,
+		Port:     port,
 	}
 	p.appendIPData(data)
 }

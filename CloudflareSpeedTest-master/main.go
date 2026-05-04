@@ -137,22 +137,6 @@ func main() {
 
 	// 开始延迟测速 + 过滤延迟/丢包
 	pingData := task.NewPing().Run().FilterDelay().FilterLossRate()
-
-	// 设置下载测速使用的 IP 端口列表（用于 per-IP 端口支持）
-	// 通过 IP 地址查找对应的端口
-	task.DownloadIPPorts = make([]*task.IPPort, len(pingData))
-	for i, data := range pingData {
-		port := task.TCPPort // 默认端口
-		// 在原始 IPPorts 中查找该 IP 对应的端口
-		for _, ipPort := range task.IPPorts {
-			if ipPort.IP.String() == data.IP.String() {
-				port = ipPort.Port
-				break
-			}
-		}
-		task.DownloadIPPorts[i] = &task.IPPort{IP: data.IP, Port: port}
-	}
-
 	// 开始下载测速
 	speedData := task.TestDownloadSpeed(pingData)
 	utils.ExportCsv(speedData) // 输出文件
